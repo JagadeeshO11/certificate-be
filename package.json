@@ -1,0 +1,16 @@
+{
+  "name": "certificate-mailer-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-parse": "^5.5.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "nodemailer": "^6.10.1"
+  }
+}
