@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import express from "express";
 import { parse } from "csv-parse/sync";
 import nodemailer from "nodemailer";
+import { getDb } from "./db.js";
 
 dotenv.config();
 
@@ -45,6 +46,46 @@ app.use(express.json());
 
 function logServerError(scope, error) {
   console.error(`[${scope}]`, error);
+}
+
+function isMongoConfigured() {
+  return Boolean(process.env.MONGODB_URI?.trim());
+}
+
+function sanitizeFilename(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
+
+  if (!normalized) {
+    return "recipients.csv";
+  }
+
+  return normalized;
+}
+
+function getFileExtension(value) {
+  return path.extname(String(value ?? "")).toLowerCase();
+}
+
+function escapeCsvCell(value) {
+  const stringValue = String(value ?? "");
+  if (stringValue.includes(",") || stringValue.includes("\"") || stringValue.includes("\n") || stringValue.includes("\r")) {
+    return `"${stringValue.replace(/"/g, "\"\"")}"`;
+  }
+  return stringValue;
+}
+
+function stringifyRecipientsCsv(rows) {
+  const header = ["Name", "Email", "Certificate"];
+  const body = rows.map((row) =>
+    [row.Name ?? row.name ?? "", row.Email ?? row.email ?? "", row.Certificate ?? row.certificate ?? row.certificates ?? ""]
+      .map(escapeCsvCell)
+      .join(",")
+  );
+
+  return [header.join(","), ...body].join("\n");
 }
 
 function requireEnv(name) {
@@ -138,9 +179,113 @@ function resolveCsvFile(listId) {
   return selectedFile;
 }
 
-function loadRecipients(listId) {
+async function listStoredFiles(listId) {
+  if (!isMongoConfigured()) {
+    return [];
+  }
+
+  const db = await getDb();
+  const files = await db.collection("csv_uploads")
+    .find({ listId })
+    .sort({ uploadedAt: -1 })
+    .limit(1000)
+    .toArray();
+
+  return files;
+}
+
+async function getLatestStoredFile(listId) {
+  const files = await listStoredFiles(listId);
+  return files[0] ?? null;
+}
+
+async function loadListContent(listId) {
   const csvFile = resolveCsvFile(listId);
-  const csvContent = fs.readFileSync(csvFile.path, "utf-8");
+  const storedFile = await getLatestStoredFile(csvFile.id);
+
+  if (storedFile) {
+    if (getFileExtension(storedFile.filename) !== ".csv") {
+      throw new Error("The uploaded file for this event is not a CSV. Delete it or upload a CSV file to continue.");
+    }
+
+    return {
+      list: {
+        id: csvFile.id,
+        name: csvFile.name
+      },
+      csvContent: storedFile.content,
+      source: {
+        type: "mongodb",
+        label: "MongoDB Upload",
+        pathname: storedFile.filename,
+        url: null,
+        uploadedAt: storedFile.uploadedAt,
+        filename: storedFile.filename
+      }
+    };
+  }
+
+  return {
+    list: {
+      id: csvFile.id,
+      name: csvFile.name
+    },
+    csvContent: fs.readFileSync(csvFile.path, "utf-8"),
+    source: {
+      type: "local",
+      label: "Local Bundle",
+      pathname: csvFile.path,
+      url: null,
+      uploadedAt: null,
+      filename: csvFile.id
+    }
+  };
+}
+
+async function saveRecipientsForSource(listId, rows, source) {
+  const csvContent = stringifyRecipientsCsv(rows);
+
+  if (source?.type === "mongodb") {
+    if (!isMongoConfigured()) {
+      throw new Error("MongoDB is not configured, so the uploaded file cannot be updated.");
+    }
+
+    const db = await getDb();
+    const filename = sanitizeFilename(source.filename || `${listId}`);
+    const uploadedAt = new Date().toISOString();
+
+    await db.collection("csv_uploads").insertOne({
+      listId,
+      filename,
+      content: csvContent,
+      uploadedAt
+    });
+
+    return {
+      type: "mongodb",
+      label: "MongoDB Upload",
+      pathname: filename,
+      url: null,
+      uploadedAt,
+      filename
+    };
+  }
+
+  const csvFile = resolveCsvFile(listId);
+  fs.writeFileSync(csvFile.path, `${csvContent}\n`, "utf-8");
+
+  return {
+    type: "local",
+    label: "Local Bundle",
+    pathname: csvFile.path,
+    url: null,
+    uploadedAt: null,
+    filename: csvFile.id
+  };
+}
+
+async function loadRecipients(listId) {
+  const { list, csvContent, source } = await loadListContent(listId);
   const rawRows = parse(csvContent, {
     columns: true,
     skip_empty_lines: true,
@@ -177,12 +322,10 @@ function loadRecipients(listId) {
   });
 
   return {
-    list: {
-      id: csvFile.id,
-      name: csvFile.name
-    },
+    list,
     recipients,
-    skipped
+    skipped,
+    source
   };
 }
 
@@ -229,6 +372,27 @@ function buildHtml(name, certificateUrl, template) {
 </html>`;
 }
 
+function extractDriveFileId(url) {
+  try {
+    const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCertificateAttachment(certificateUrl) {
+  const fileId = extractDriveFileId(certificateUrl);
+  if (!fileId) return null;
+
+  const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const response = await fetch(downloadUrl);
+  if (!response.ok) return null;
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return { filename: "certificate.pdf", content: buffer, contentType: "application/pdf" };
+}
+
 function createTransporter() {
   return nodemailer.createTransport({
     service: "gmail",
@@ -240,7 +404,11 @@ function createTransporter() {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, sending: isSending });
+  res.json({
+    ok: true,
+    sending: isSending,
+    mongodbConfigured: isMongoConfigured()
+  });
 });
 
 app.get("/", (_req, res) => {
@@ -282,17 +450,138 @@ app.get("/api/lists", (_req, res) => {
   }
 });
 
-app.get("/api/recipients", (_req, res) => {
+app.get("/api/recipients", async (_req, res) => {
   try {
-    const { list, recipients, skipped } = loadRecipients(String(_req.query.list ?? ""));
+    const { list, recipients, skipped, source } = await loadRecipients(String(_req.query.list ?? ""));
     res.json({
       list,
       recipients,
-      skipped
+      skipped,
+      source
     });
   } catch (error) {
     logServerError("api/recipients", error);
     res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete("/api/recipients", async (_req, res) => {
+  try {
+    const listId = String(_req.body?.listId ?? "").trim();
+    const email = String(_req.body?.email ?? "").trim().toLowerCase();
+
+    if (!listId || !email) {
+      return res.status(400).json({ message: "Both listId and email are required to delete a recipient." });
+    }
+
+    const { list, csvContent, source } = await loadListContent(listId);
+    const rawRows = parse(csvContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+
+    const remainingRows = rawRows.filter((row) => String(row.email ?? row.Email ?? "").trim().toLowerCase() !== email);
+
+    if (remainingRows.length === rawRows.length) {
+      return res.status(404).json({ message: `No recipient with email ${email} was found in ${list.name}.` });
+    }
+
+    const nextSource = await saveRecipientsForSource(list.id, remainingRows, source);
+
+    return res.json({
+      message: `Deleted recipient ${email} from ${list.name}.`,
+      source: nextSource
+    });
+  } catch (error) {
+    logServerError("api/recipients/delete", error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/lists/:listId/upload", express.raw({ type: () => true, limit: "4mb" }), async (_req, res) => {
+  try {
+    const listId = String(_req.params.listId ?? "").trim();
+    const list = resolveCsvFile(listId);
+
+    if (!isMongoConfigured()) {
+      return res.status(503).json({
+        message: "MongoDB is not configured. Add MONGODB_URI to the backend environment before uploading files."
+      });
+    }
+
+    const originalFilename = sanitizeFilename(String(_req.query.filename ?? list.id));
+    const extension = getFileExtension(originalFilename);
+
+    if (extension !== ".csv") {
+      return res.status(400).json({
+        message: "Only CSV uploads are supported for recipient loading right now. You can still delete older uploaded files from this event."
+      });
+    }
+
+    const body = Buffer.isBuffer(_req.body) ? _req.body : Buffer.from(_req.body ?? "");
+    if (body.length === 0) {
+      return res.status(400).json({ message: "Upload failed because the file was empty." });
+    }
+
+    const content = body.toString("utf-8");
+    parse(content, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+
+    const db = await getDb();
+    const uploadedAt = new Date().toISOString();
+    await db.collection("csv_uploads").insertOne({
+      listId,
+      filename: originalFilename,
+      content,
+      uploadedAt
+    });
+
+    return res.json({
+      message: `Uploaded ${originalFilename} for ${list.name}. The dashboard will now use this stored CSV.`,
+      source: {
+        type: "mongodb",
+        label: "MongoDB Upload",
+        pathname: originalFilename,
+        url: null,
+        uploadedAt,
+        filename: originalFilename
+      }
+    });
+  } catch (error) {
+    logServerError("api/lists/upload", error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete("/api/lists/:listId/upload", async (_req, res) => {
+  try {
+    const listId = String(_req.params.listId ?? "").trim();
+    const list = resolveCsvFile(listId);
+
+    if (!isMongoConfigured()) {
+      return res.status(503).json({
+        message: "MongoDB is not configured, so there is no cloud file to delete for this event."
+      });
+    }
+
+    const storedFiles = await listStoredFiles(list.id);
+    if (storedFiles.length === 0) {
+      return res.status(404).json({ message: "No uploaded CSV or Excel file was found for this event." });
+    }
+
+    const db = await getDb();
+    await db.collection("csv_uploads").deleteMany({ listId });
+
+    return res.json({
+      message: `Deleted ${storedFiles.length} uploaded file(s) for ${list.name}. The dashboard will now fall back to the local bundled CSV.`
+    });
+  } catch (error) {
+    logServerError("api/lists/delete-upload", error);
+    return res.status(500).json({ message: error.message });
   }
 });
 
@@ -303,13 +592,17 @@ app.post("/api/send", async (_req, res) => {
 
   try {
     isSending = true;
-    const { list, recipients, skipped } = loadRecipients(String(_req.body?.listId ?? ""));
-    const requestedBatchSize = Number.parseInt(String(_req.body?.batchSize ?? ""), 10);
-    const batchSize =
-      Number.isFinite(requestedBatchSize) && requestedBatchSize > 0
-        ? Math.min(requestedBatchSize, recipients.length)
-        : recipients.length;
-    const recipientsToSend = recipients.slice(0, batchSize);
+    const requestedEmails = Array.isArray(_req.body?.emails) && _req.body.emails.length > 0
+      ? new Set(_req.body.emails.map((e) => String(e).trim().toLowerCase()))
+      : null;
+
+    if (!requestedEmails) {
+      isSending = false;
+      return res.status(400).json({ message: "No emails selected. Check the rows you want to send and try again." });
+    }
+
+    const { list, recipients, skipped, source } = await loadRecipients(String(_req.body?.listId ?? ""));
+    const recipientsToSend = recipients.filter((r) => requestedEmails.has(r.email.trim().toLowerCase()));
     const transporter = createTransporter();
     const fromName = requireEnv("FROM_NAME");
     const fromEmail = requireEnv("GMAIL_USER");
@@ -323,12 +616,14 @@ app.post("/api/send", async (_req, res) => {
 
     for (const recipient of recipientsToSend) {
       try {
+        const attachment = await fetchCertificateAttachment(recipient.certificates);
         await transporter.sendMail({
           from: `${fromName} <${fromEmail}>`,
           to: recipient.email,
           subject,
           text: `Hi ${recipient.name},\n\n${template.letter}\n\n${template.viewButtonText}: ${recipient.certificates}\n\nBest regards,\nCodeathon 2K26 Team`,
-          html: buildHtml(recipient.name, recipient.certificates, template)
+          html: buildHtml(recipient.name, recipient.certificates, template),
+          attachments: attachment ? [attachment] : []
         });
         sent.push(recipient.email);
         const delivery = {
@@ -357,10 +652,11 @@ app.post("/api/send", async (_req, res) => {
 
         if (classifiedError.status === "blocked") {
           return res.status(429).json({
-            message: "Sending stopped because Gmail blocked this account for heavy usage or login issues.",
+            message: "Sending stopped because Gmail blocked this account for heavy usage, limit issues, or login problems.",
             processedCount: sent.length + failed.length,
             remainingCount: Math.max(recipients.length - (sent.length + failed.length), 0),
             list,
+            source,
             sent,
             failed,
             results,
@@ -375,6 +671,7 @@ app.post("/api/send", async (_req, res) => {
       processedCount: recipientsToSend.length,
       remainingCount: Math.max(recipients.length - recipientsToSend.length, 0),
       list,
+      source,
       sent,
       failed,
       results,
