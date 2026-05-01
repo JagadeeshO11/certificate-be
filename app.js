@@ -56,7 +56,7 @@ function sanitizeFilename(value) {
   const base = String(value ?? "")
     .trim()
     .replace(/\.csv$/i, "")
-    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 
