@@ -43,6 +43,10 @@ const certificationTracks = [
 app.use(cors());
 app.use(express.json());
 
+function logServerError(scope, error) {
+  console.error(`[${scope}]`, error);
+}
+
 function requireEnv(name) {
   const value = process.env[name]?.trim();
   if (!value) {
@@ -273,6 +277,7 @@ app.get("/api/lists", (_req, res) => {
       }))
     });
   } catch (error) {
+    logServerError("api/lists", error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -286,6 +291,7 @@ app.get("/api/recipients", (_req, res) => {
       skipped
     });
   } catch (error) {
+    logServerError("api/recipients", error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -375,6 +381,7 @@ app.post("/api/send", async (_req, res) => {
       skipped
     });
   } catch (error) {
+    logServerError("api/send", error);
     return res.status(500).json({ message: error.message });
   } finally {
     isSending = false;
