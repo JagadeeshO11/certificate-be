@@ -53,16 +53,14 @@ function isMongoConfigured() {
 }
 
 function sanitizeFilename(value) {
-  const normalized = String(value ?? "")
+  const base = String(value ?? "")
     .trim()
+    .replace(/\.csv$/i, "")
     .replace(/[^a-zA-Z0-9._-]/g, "-")
-    .replace(/-+/g, "-");
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 
-  if (!normalized) {
-    return "recipients.csv";
-  }
-
-  return normalized;
+  return (base || "recipients") + ".csv";
 }
 
 function getFileExtension(value) {
