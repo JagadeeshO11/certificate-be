@@ -4,7 +4,9 @@ export default app;
 
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: {
+      sizeLimit: "4mb"
+    },
     responseLimit: "8mb"
   }
 };

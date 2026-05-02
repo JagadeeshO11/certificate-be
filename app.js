@@ -277,7 +277,10 @@ function createTransporter() {
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     if (req.body instanceof Buffer) { resolve(req.body); return; }
-    if (typeof req.body === "string") { resolve(Buffer.from(req.body)); return; }
+    if (typeof req.body === "string") { resolve(Buffer.from(req.body, "utf-8")); return; }
+    if (req.body && typeof req.body === "object" && !Array.isArray(req.body)) {
+      resolve(Buffer.from(JSON.stringify(req.body), "utf-8")); return;
+    }
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks)));
