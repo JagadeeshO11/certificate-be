@@ -223,7 +223,7 @@ async function loadRecipients(listId, colMap = {}) {
   const certKey = colMap.certificate || "";
 
   rawRows.forEach((row, index) => {
-    const name = nameKey ? (row[nameKey] ?? "").toString().trim() : resolveColumn(row, "name", "Name", "student name", "Student Name", "full name", "Full Name", "participant");
+    const name = nameKey ? (row[nameKey] ?? "").toString().trim() : resolveColumn(row, "name", "Name", "participants", "Participants", "student name", "Student Name", "full name", "Full Name", "participant");
     const email = emailKey ? (row[emailKey] ?? "").toString().trim() : resolveColumn(row, "email", "Email", "mail", "Mail", "email address", "Email Address");
     const certificates = certKey ? (row[certKey] ?? "").toString().trim() : resolveColumn(row, "certificate", "Certificate", "certificates", "Certificates", "cert link", "drive link", "Drive Link", "url", "URL", "link", "Link");
 
