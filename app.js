@@ -204,29 +204,40 @@ async function saveRecipientsForSource(listId, rows, source) {
   return { type: "local", label: "Local Bundle", pathname: csvFile.path, url: null, uploadedAt: null, filename: csvFile.id };
 }
 
-async function loadRecipients(listId) {
+function resolveColumn(row, ...keys) {
+  for (const key of keys) {
+    const found = Object.keys(row).find((k) => k.trim().toLowerCase() === key.toLowerCase());
+    if (found && row[found]?.toString().trim()) return row[found].toString().trim();
+  }
+  return "";
+}
+
+async function loadRecipients(listId, colMap = {}) {
   const { list, csvContent, source } = await loadListContent(listId);
   const rawRows = parse(csvContent, { columns: true, skip_empty_lines: true, trim: true });
   const recipients = [];
   const skipped = [];
 
+  const nameKey = colMap.name || "";
+  const emailKey = colMap.email || "";
+  const certKey = colMap.certificate || "";
+
   rawRows.forEach((row, index) => {
-    const recipient = {
-      name: (row.name ?? row.Name ?? "").trim(),
-      email: (row.email ?? row.Email ?? "").trim(),
-      certificates: (row.certificates ?? row.Certificate ?? row.certificate ?? "").trim()
-    };
+    const name = nameKey ? (row[nameKey] ?? "").toString().trim() : resolveColumn(row, "name", "Name", "student name", "Student Name", "full name", "Full Name", "participant");
+    const email = emailKey ? (row[emailKey] ?? "").toString().trim() : resolveColumn(row, "email", "Email", "mail", "Mail", "email address", "Email Address");
+    const certificates = certKey ? (row[certKey] ?? "").toString().trim() : resolveColumn(row, "certificate", "Certificate", "certificates", "Certificates", "cert link", "drive link", "Drive Link", "url", "URL", "link", "Link");
+
     const rowNumber = index + 2;
-    if (!recipient.name || !recipient.email || !recipient.certificates) {
+    if (!name || !email || !certificates) {
       skipped.push({ row: rowNumber, reason: "Missing name, email, or certificate link." }); return;
     }
-    if (!isValidEmail(recipient.email)) {
-      skipped.push({ row: rowNumber, reason: `Invalid email: ${recipient.email}` }); return;
+    if (!isValidEmail(email)) {
+      skipped.push({ row: rowNumber, reason: `Invalid email: ${email}` }); return;
     }
-    if (!isValidUrl(recipient.certificates)) {
+    if (!isValidUrl(certificates)) {
       skipped.push({ row: rowNumber, reason: "Certificate link must be a valid http/https URL." }); return;
     }
-    recipients.push(recipient);
+    recipients.push({ name, email, certificates });
   });
 
   return { list, recipients, skipped, source };
@@ -329,7 +340,12 @@ app.get("/api/lists", (_req, res) => {
 app.get("/api/recipients", async (_req, res) => {
   try {
     const listId = String(_req.query.list ?? "");
-    const { list, recipients, skipped, source } = await loadRecipients(listId);
+    const colMap = {
+      name: String(_req.query.colName ?? "").trim(),
+      email: String(_req.query.colEmail ?? "").trim(),
+      certificate: String(_req.query.colCert ?? "").trim()
+    };
+    const { list, recipients, skipped, source } = await loadRecipients(listId, colMap);
 
     let sentEmails = new Set();
     if (isMongoConfigured()) {
@@ -436,6 +452,19 @@ app.delete("/api/lists/:listId/sent-log", async (_req, res) => {
   }
 });
 
+app.get("/api/lists/:listId/columns", async (_req, res) => {
+  try {
+    const listId = String(_req.params.listId ?? "").trim();
+    const { csvContent } = await loadListContent(listId);
+    const rows = parse(csvContent, { columns: true, skip_empty_lines: true, trim: true, to: 1 });
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+    return res.json({ columns });
+  } catch (error) {
+    logServerError("api/lists/columns", error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.post("/api/send", async (_req, res) => {
   if (isSending) return res.status(409).json({ message: "A send job is already running. Please wait for it to finish." });
 
@@ -451,7 +480,12 @@ app.post("/api/send", async (_req, res) => {
     }
 
     const listId = String(_req.body?.listId ?? "").trim();
-    const { list, recipients, skipped, source } = await loadRecipients(listId);
+    const colMap = {
+      name: String(_req.body?.colName ?? "").trim(),
+      email: String(_req.body?.colEmail ?? "").trim(),
+      certificate: String(_req.body?.colCert ?? "").trim()
+    };
+    const { list, recipients, skipped, source } = await loadRecipients(listId, colMap);
 
     let alreadySent = new Set();
     if (isMongoConfigured()) {
