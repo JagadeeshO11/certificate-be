@@ -113,6 +113,15 @@ function isValidUrl(value) {
   } catch { return false; }
 }
 
+const DEFAULT_SEND_BATCH_SIZE = 10;
+const MAX_SEND_BATCH_SIZE = 25;
+
+function getSendBatchSize(input) {
+  const requested = Number.parseInt(input, 10);
+  if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_SEND_BATCH_SIZE;
+  return Math.min(requested, MAX_SEND_BATCH_SIZE);
+}
+
 function classifySendError(error) {
   const message = error?.message ?? "Unknown send failure.";
   const lowerMessage = message.toLowerCase();
@@ -494,14 +503,26 @@ app.post("/api/send", async (_req, res) => {
       alreadySent = new Set(sentDocs.map((d) => d.email.toLowerCase()));
     }
 
-    const recipientsToSend = recipients.filter((r) => {
+    const eligibleRecipients = recipients.filter((r) => {
       const email = r.email.trim().toLowerCase();
       return requestedEmails.has(email) && !alreadySent.has(email);
     });
 
+    const batchSize = getSendBatchSize(_req.body?.batchSize);
+    const recipientsToSend = eligibleRecipients.slice(0, batchSize);
+    const remainingRecipients = eligibleRecipients.slice(batchSize);
+
     if (recipientsToSend.length === 0) {
       isSending = false;
-      return res.status(200).json({ message: "All selected recipients have already been sent. No duplicates sent.", processedCount: 0, remainingCount: 0, list, source, sent: [], failed: [], results: [], skipped });
+      return res.status(200).json({
+        message: "All selected recipients have already been sent. No duplicates sent.",
+        processedCount: 0,
+        batchSize,
+        remainingCount: 0,
+        remainingEmails: [],
+        hasMore: false,
+        list, source, sent: [], failed: [], results: [], skipped
+      });
     }
 
     const transporter = createTransporter();
@@ -543,7 +564,9 @@ app.post("/api/send", async (_req, res) => {
           return res.status(429).json({
             message: "Sending stopped because Gmail blocked this account for heavy usage, limit issues, or login problems.",
             processedCount: sent.length + failed.length,
-            remainingCount: Math.max(recipients.length - (sent.length + failed.length), 0),
+            remainingCount: remainingRecipients.length,
+            batchSize,
+            remainingEmails: remainingRecipients.map((recipient) => recipient.email),
             list, source, sent, failed, results, skipped
           });
         }
@@ -551,9 +574,12 @@ app.post("/api/send", async (_req, res) => {
     }
 
     return res.json({
-      message: `Processed ${recipientsToSend.length} email(s). ${sent.length} done, ${failed.length} failed.`,
+      message: `Processed batch of ${recipientsToSend.length} email(s). ${sent.length} done, ${failed.length} failed.`,
       processedCount: recipientsToSend.length,
-      remainingCount: Math.max(recipients.length - recipientsToSend.length, 0),
+      batchSize,
+      remainingCount: remainingRecipients.length,
+      remainingEmails: remainingRecipients.map((recipient) => recipient.email),
+      hasMore: remainingRecipients.length > 0,
       list, source, sent, failed, results, skipped
     });
   } catch (error) {
